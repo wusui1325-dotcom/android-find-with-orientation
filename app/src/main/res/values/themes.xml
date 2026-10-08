@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FindOrientation" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#071018</item>
+        <item name="android:navigationBarColor">#071018</item>
+        <item name="android:windowBackground">#071018</item>
+    </style>
+</resources>

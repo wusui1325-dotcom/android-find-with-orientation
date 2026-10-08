@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">方向尋找</string>
+    <string name="channel_name">近距離尋找</string>
+    <string name="channel_desc">保持藍牙廣播與掃描，以便 10 米內的客戶端互相顯示方向</string>
+</resources>
