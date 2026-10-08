@@ -125,6 +125,7 @@ class UwbRanger(
                     )
                 }
                 is RangingResult.RangingResultPeerDisconnected -> onLog("UWB 對端離開測距")
+                else -> Unit
             }
         }
     }
@@ -138,6 +139,5 @@ class UwbRanger(
 
     fun close() {
         stop()
-        runCatching { manager?.close() }
     }
 }

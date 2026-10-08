@@ -52,7 +52,7 @@
 
 ## 建置
 
-可以拉下來直接編。需要 Android Studio、JDK 17、Android SDK 35。第一次同步會下載 Gradle 8.11.1。
+可以拉下來直接編。需要 Android Studio、JDK 17、Android SDK 36。第一次同步會下載 Gradle 8.11.1。
 
 ```bash
 git clone https://github.com/wusui1325-dotcom/android-find-with-orientation.git

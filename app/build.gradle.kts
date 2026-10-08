@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.wusper.findorientation"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.wusper.findorientation"
@@ -47,6 +47,6 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.core:core-uwb:1.0.0")
+    implementation("androidx.core.uwb:uwb:1.0.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
