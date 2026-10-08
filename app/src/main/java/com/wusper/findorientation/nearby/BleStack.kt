@@ -36,6 +36,7 @@ class BleStack(
     private val onIdentity: (address: String, Proto.Identity) -> Unit,
     private val onAccept: (address: String, Proto.SessionAccept) -> Unit,
     private val onOffer: (address: String, Proto.SessionOffer) -> Unit,
+    private val onLocation: (address: String, Proto.GeoFix) -> Unit,
     private val onLog: (String) -> Unit
 ) {
     private val manager = context.getSystemService(BluetoothManager::class.java)
@@ -47,6 +48,7 @@ class BleStack(
     private val centrals = linkedMapOf<String, BluetoothDevice>()
     private var identityPayload = ByteArray(0)
     private var acceptPayload: ByteArray? = null
+    private var locationPayload = ByteArray(0)
     private val parcel = ParcelUuid(Proto.SERVICE)
     private val cccd = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
@@ -84,6 +86,7 @@ class BleStack(
             val payload = when (characteristic.uuid) {
                 Proto.IDENTITY -> identityPayload
                 Proto.SESSION -> acceptPayload ?: byteArrayOf()
+                Proto.LOCATION -> locationPayload
                 else -> byteArrayOf()
             }
             val slice = if (offset >= payload.size) byteArrayOf() else payload.copyOfRange(offset, payload.size)
@@ -126,6 +129,17 @@ class BleStack(
     }
 
     @SuppressLint("MissingPermission")
+    fun publishLocation(payload: ByteArray) {
+        locationPayload = payload
+        val ch = gattServer?.getService(Proto.SERVICE)?.getCharacteristic(Proto.LOCATION) ?: return
+        @Suppress("DEPRECATION")
+        ch.value = payload
+        centrals.values.forEach { device ->
+            runCatching { gattServer?.notifyCharacteristicChanged(device, ch, false) }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     fun publishAccept(payload: ByteArray) {
         acceptPayload = payload
         val service = gattServer?.getService(Proto.SERVICE) ?: return
@@ -138,7 +152,7 @@ class BleStack(
     }
 
     @SuppressLint("MissingPermission")
-    fun start(identity: ByteArray, advert: ByteArray) {
+    fun start(identity: ByteArray, advert: ByteArray, scan: Boolean) {
         identityPayload = identity
         openServer()
         val settings = AdvertiseSettings.Builder()
@@ -149,10 +163,14 @@ class BleStack(
         val data = AdvertiseData.Builder().addServiceUuid(parcel).setIncludeDeviceName(false).build()
         val scanResponse = AdvertiseData.Builder().addServiceData(parcel, advert).build()
         advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
-        val filters = listOf(ScanFilter.Builder().setServiceUuid(parcel).build())
-        val scanSettings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
-        scanner?.startScan(filters, scanSettings, scanCallback)
-        onLog("藍牙廣播與掃描已開始")
+        if (scan) {
+            val filters = listOf(ScanFilter.Builder().setServiceUuid(parcel).build())
+            val scanSettings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+            scanner?.startScan(filters, scanSettings, scanCallback)
+            onLog("藍牙廣播與掃描已開始")
+        } else {
+            onLog("常駐廣播已開始，等待其他客戶端尋找")
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -185,7 +203,21 @@ class BleStack(
                     Proto.parseIdentity(value)?.let { onIdentity(address, it) }
                     val session = g.getService(Proto.SERVICE)?.getCharacteristic(Proto.SESSION) ?: return
                     g.setCharacteristicNotification(session, true)
+                    val location = g.getService(Proto.SERVICE)?.getCharacteristic(Proto.LOCATION)
+                    if (location != null) g.setCharacteristicNotification(location, true)
                     session.getDescriptor(cccd)?.let { desc ->
+                        desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        g.writeDescriptor(desc)
+                    }
+                }
+            }
+
+            @Suppress("DEPRECATION")
+            override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                val service = g.getService(Proto.SERVICE) ?: return
+                val location = service.getCharacteristic(Proto.LOCATION) ?: return
+                if (descriptor.characteristic.uuid == Proto.SESSION) {
+                    location.getDescriptor(cccd)?.let { desc ->
                         desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                         g.writeDescriptor(desc)
                     }
@@ -195,8 +227,13 @@ class BleStack(
             @Suppress("DEPRECATION")
             override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
                 val value = characteristic.value ?: return
-                val parsed = Proto.parseSession(value) ?: return
-                if (parsed is Proto.SessionAccept) onAccept(address, parsed)
+                when (characteristic.uuid) {
+                    Proto.SESSION -> {
+                        val parsed = Proto.parseSession(value) ?: return
+                        if (parsed is Proto.SessionAccept) onAccept(address, parsed)
+                    }
+                    Proto.LOCATION -> Proto.parseGeo(value)?.let { onLocation(address, it) }
+                }
             }
         }, BluetoothDevice.TRANSPORT_LE)
         clients[address] = gatt
@@ -249,6 +286,18 @@ class BleStack(
         )
         service.addCharacteristic(identity)
         service.addCharacteristic(session)
+        val location = BluetoothGattCharacteristic(
+            Proto.LOCATION,
+            BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        location.addDescriptor(
+            BluetoothGattDescriptor(
+                cccd,
+                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+            )
+        )
+        service.addCharacteristic(location)
         server.addService(service)
         gattServer = server
     }

@@ -21,7 +21,8 @@ class FindService : Service() {
             this,
             41,
             notification,
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         )
         (application as FindApp).repository.start()
         return START_STICKY
@@ -40,7 +41,7 @@ class FindService : Service() {
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(getString(R.string.app_name))
-            .setContentText("正在 10 米範圍內廣播並尋找其他客戶端")
+            .setContentText("常駐廣播中。10 米內的客戶端可以尋找這台裝置")
             .setOngoing(true)
             .build()
     }

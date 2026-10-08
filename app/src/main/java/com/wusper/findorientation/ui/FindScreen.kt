@@ -46,7 +46,9 @@ fun FindScreen(
     missingPermissions: List<String>,
     onRequestPermissions: () -> Unit,
     onStart: () -> Unit,
-    onStop: () -> Unit
+    onStop: () -> Unit,
+    batteryRestricted: Boolean,
+    onRequestBattery: () -> Unit
 ) {
     val state by repository.state.collectAsState()
     var name by rememberSaveable { mutableStateOf(state.displayName) }
@@ -76,7 +78,12 @@ fun FindScreen(
             }
         }
         ToggleRow("可被發現", state.visible) { repository.setVisible(it) }
+        ToggleRow("常駐被發現", state.resident) { repository.setResident(it) }
         ToggleRow("尋找其他裝置", state.seeking) { repository.setSeeking(it) }
+        ToggleRow("融合定位後備", state.geoFallback) { repository.setGeoFallback(it) }
+        if (state.resident && batteryRestricted) {
+            Button(onClick = onRequestBattery) { Text("允許背景運行") }
+        }
         Text("顯示名稱", fontSize = 13.sp, color = Color(0xFF9ED9CC))
         BasicTextField(
             value = name,
@@ -99,7 +106,7 @@ fun FindScreen(
         visiblePeers.forEach { peer -> PeerRow(peer) }
         Spacer(Modifier.height(18.dp))
         Text(
-            "手機頂端為前方。UWB 會給出實時方位角；沒有 UWB 的裝置請緩慢轉身，程式用訊號最強的朝向估計方向。超過 10 米不會畫出。",
+            "手機頂端為前方。琥珀色是 UWB，綠色是融合定位，藍色是旋轉估計。常駐被發現會在開機後恢復廣播，但強制停止或廠商省電仍可能把它殺掉。超過 10 米不會畫出。",
             color = Color(0xFF6E8B84),
             fontSize = 12.sp
         )
@@ -148,7 +155,11 @@ private fun Radar(peers: List<PeerSighting>) {
             } else {
                 val rad = Math.toRadians(deg.toDouble() - 90.0)
                 val at = Offset(c.x + (cos(rad) * r).toFloat(), c.y + (sin(rad) * r).toFloat())
-                val color = if (peer.bearingSource == BearingSource.UWB) Color(0xFFFFB020) else Color(0xFF7FD0FF)
+                val color = when (peer.bearingSource) {
+                    BearingSource.UWB -> Color(0xFFFFB020)
+                    BearingSource.GEO -> Color(0xFFB6FF6A)
+                    else -> Color(0xFF7FD0FF)
+                }
                 drawCircle(color, 9f, at)
                 drawLine(color, c, at, 2f)
             }
@@ -158,10 +169,11 @@ private fun Radar(peers: List<PeerSighting>) {
 
 @Composable
 private fun PeerRow(peer: PeerSighting) {
-    val meters = peer.uwbMeters ?: peer.estimatedMeters
+    val meters = peer.meters
     val angle = peer.azimuthDeg?.let { "${it.toInt()}°" } ?: "角度未鎖定"
     val source = when (peer.bearingSource) {
         BearingSource.UWB -> "UWB"
+        BearingSource.GEO -> "融合定位 ±${peer.geoAccuracy?.toInt() ?: "?"} 米"
         BearingSource.SPIN -> "旋轉估計"
         BearingSource.NONE -> "只有距離"
     }

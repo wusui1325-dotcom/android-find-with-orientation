@@ -8,6 +8,7 @@ object Proto {
     val SERVICE: UUID = UUID.fromString("f17d0e11-4a6b-4c2e-9f10-0a11b0c1d001")
     val IDENTITY: UUID = UUID.fromString("f17d0e11-4a6b-4c2e-9f10-0a11b0c1d002")
     val SESSION: UUID = UUID.fromString("f17d0e11-4a6b-4c2e-9f10-0a11b0c1d003")
+    val LOCATION: UUID = UUID.fromString("f17d0e11-4a6b-4c2e-9f10-0a11b0c1d004")
 
     const val FLAG_UWB = 1
     const val OFFER = 1
@@ -23,6 +24,7 @@ object Proto {
         val sessionKey: ByteArray
     )
     data class SessionAccept(val id: ByteArray, val controleeAddress: ByteArray)
+    data class GeoFix(val lat: Double, val lng: Double, val accuracy: Float, val heading: Float)
 
     fun advert(flags: Int, id: ByteArray, name: String): ByteArray {
         val nameBytes = name.encodeToByteArray().take(7).toByteArray()
@@ -87,6 +89,23 @@ object Proto {
             }
             else -> null
         }
+    }
+
+    fun geo(fix: GeoFix): ByteArray {
+        val buf = ByteBuffer.allocate(25)
+        buf.put(VERSION.toByte())
+        buf.putDouble(fix.lat)
+        buf.putDouble(fix.lng)
+        buf.putFloat(fix.accuracy)
+        buf.putFloat(fix.heading)
+        return buf.array()
+    }
+
+    fun parseGeo(data: ByteArray): GeoFix? {
+        if (data.size < 25 || data[0].toInt() != VERSION) return null
+        val buf = ByteBuffer.wrap(data)
+        buf.get()
+        return GeoFix(buf.double, buf.double, buf.float, buf.float)
     }
 
     fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02X".format(it) }

@@ -36,8 +36,26 @@
 4. 要看別人的，打開「尋找其他裝置」。手機頂端對準前方。
 5. 琥珀色點是 UWB 角度，藍色點是旋轉估計。
 
+## 常駐被發現
+
+打開「常駐被發現」再按「開始」後，前景服務會一直廣播。開機或更新 App 後會自行恢復。常駐時只廣播、不掃描，等別的客戶端來找。
+
+這不是強制停止後也能活。Android 不允許被強制停止的 App 自行起來。部分廠商還會殺前景服務，所以要再按「允許背景運行」。通知必須留著。
+
+## 後備定位
+
+優先順序是 UWB、融合定位、旋轉估計。
+
+融合定位用系統 `LocationManager` 的 GPS 與網絡位置，經藍牙交給對端，再算方位角和距離。這是每支手機都有的方案，不依賴 Google Play。室外、雙方誤差小於 30 米時可用。10 米內的衛星誤差常常大於兩機距離，所以它標成綠色，並顯示誤差。室內不要指望它。
+
+藍牙通道探測和 Wi-Fi RTT 更準，但要雙方硬體支援，普及度還不如 GPS，所以沒有當成預設後備。
+
 ## 建置
 
+可以拉下來直接編。需要 Android Studio、JDK 17、Android SDK 35。第一次同步會下載 Gradle 8.11.1。
+
 ```bash
+git clone https://github.com/wusui1325-dotcom/android-find-with-orientation.git
+cd android-find-with-orientation
 ./gradlew :app:assembleDebug
 ```

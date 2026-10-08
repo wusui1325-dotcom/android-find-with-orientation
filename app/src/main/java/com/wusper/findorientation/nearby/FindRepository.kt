@@ -5,6 +5,10 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
+import android.os.Bundle
 import com.wusper.findorientation.model.BearingSource
 import com.wusper.findorientation.model.FindState
 import com.wusper.findorientation.model.IdentityStore
@@ -25,6 +29,8 @@ class FindRepository(context: Context) : SensorEventListener {
     private val app = context.applicationContext
     private val identity = IdentityStore(app)
     private val sensors = app.getSystemService(SensorManager::class.java)
+    private val locations = app.getSystemService(LocationManager::class.java)
+    private var ownFix: Proto.GeoFix? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val peers = linkedMapOf<String, PeerSighting>()
     private val addressToId = hashMapOf<String, String>()
@@ -44,6 +50,7 @@ class FindRepository(context: Context) : SensorEventListener {
         onIdentity = ::onIdentity,
         onAccept = ::onAccept,
         onOffer = ::onOffer,
+        onLocation = ::onPeerLocation,
         onLog = ::setStatus
     )
 
@@ -51,6 +58,8 @@ class FindRepository(context: Context) : SensorEventListener {
         FindState(
             displayName = identity.displayName,
             shortId = Proto.hex(identity.idBytes().copyOfRange(0, 4)),
+            resident = identity.resident,
+            geoFallback = identity.geoFallback,
             uwbHardware = uwb.hardware
         )
     )
@@ -72,27 +81,42 @@ class FindRepository(context: Context) : SensorEventListener {
         if (running) restartRadio()
     }
 
+    fun setResident(value: Boolean) {
+        identity.resident = value
+        _state.update { it.copy(resident = value, visible = if (value) true else it.visible) }
+        if (running) restartRadio()
+    }
+
+    fun setGeoFallback(value: Boolean) {
+        identity.geoFallback = value
+        _state.update { it.copy(geoFallback = value) }
+    }
+
     fun start() {
         if (running) return
         running = true
         sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
             sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
         }
+        if (identity.resident) _state.update { it.copy(resident = true, visible = true) }
+        listenLocation()
         restartRadio()
         loop = scope.launch {
             while (running) {
                 prune()
+                publishOwnLocation()
                 publish()
                 delay(400)
             }
         }
-        setStatus(if (uwb.hardware) "尋找中。此機支援 UWB 角度" else "尋找中。此機無 UWB，方向靠旋轉對準訊號")
+        setStatus(if (uwb.hardware) "尋找中。此機支援 UWB 角度" else "尋找中。無 UWB 時用融合定位，室內再靠旋轉估計")
     }
 
     fun stop() {
         running = false
         loop?.cancel()
         sensors.unregisterListener(this)
+        runCatching { locations.removeUpdates(locationListener) }
         ble.stop()
         uwb.stop()
         peers.clear()
@@ -113,7 +137,7 @@ class FindRepository(context: Context) : SensorEventListener {
             return
         }
         publishIdentity()
-        ble.start(identityPayload(), advertPayload())
+        ble.start(identityPayload(), advertPayload(), snap.seeking)
     }
 
     private fun publishIdentity() {
@@ -138,16 +162,21 @@ class FindRepository(context: Context) : SensorEventListener {
         samples.addLast(heading to sighting.rssi)
         while (samples.size > 40) samples.removeFirst()
         val spinBearing = spinBearing(samples)
+        val locked = existing?.bearingSource == BearingSource.UWB ||
+            (existing?.bearingSource == BearingSource.GEO && existing.geoMeters != null)
         peers[short] = PeerSighting(
             id = existing?.id ?: short,
             name = existing?.name ?: sighting.advert.name.ifBlank { "客戶端 $short" },
             rssi = sighting.rssi,
             estimatedMeters = meters,
+            geoMeters = existing?.geoMeters,
+            geoAccuracy = existing?.geoAccuracy,
             uwbMeters = existing?.uwbMeters,
-            azimuthDeg = existing?.azimuthDeg ?: spinBearing,
+            azimuthDeg = if (locked) existing?.azimuthDeg else spinBearing,
             elevationDeg = existing?.elevationDeg,
             bearingSource = when {
                 existing?.bearingSource == BearingSource.UWB -> BearingSource.UWB
+                existing?.bearingSource == BearingSource.GEO && existing.geoMeters != null -> BearingSource.GEO
                 spinBearing != null -> BearingSource.SPIN
                 else -> BearingSource.NONE
             },
@@ -273,6 +302,8 @@ class FindRepository(context: Context) : SensorEventListener {
         name = "客戶端 $short",
         rssi = -100,
         estimatedMeters = null,
+        geoMeters = null,
+        geoAccuracy = null,
         uwbMeters = null,
         azimuthDeg = null,
         elevationDeg = null,
@@ -281,6 +312,55 @@ class FindRepository(context: Context) : SensorEventListener {
         lastSeenElapsedMs = android.os.SystemClock.elapsedRealtime(),
         bleAddress = address
     )
+
+    private val locationListener = object : LocationListener {
+        override fun onLocationChanged(location: Location) {
+            if (!_state.value.geoFallback) return
+            if (location.accuracy > 30f) return
+            ownFix = Proto.GeoFix(location.latitude, location.longitude, location.accuracy, heading)
+            publishOwnLocation()
+        }
+
+        @Deprecated("legacy")
+        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) = Unit
+        override fun onProviderEnabled(provider: String) = Unit
+        override fun onProviderDisabled(provider: String) = Unit
+    }
+
+    private fun listenLocation() {
+        val fine = android.content.pm.PackageManager.PERMISSION_GRANTED ==
+            app.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION)
+        if (!fine) return
+        listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach { provider ->
+            if (locations.isProviderEnabled(provider)) {
+                runCatching { locations.requestLocationUpdates(provider, 1000L, 0f, locationListener) }
+            }
+        }
+    }
+
+    private fun publishOwnLocation() {
+        val fix = ownFix ?: return
+        if (!_state.value.geoFallback) return
+        ble.publishLocation(Proto.geo(fix.copy(heading = heading)))
+    }
+
+    private fun onPeerLocation(address: String, fix: Proto.GeoFix) {
+        if (!_state.value.geoFallback || fix.accuracy > 30f) return
+        val short = addressToId[address] ?: return
+        val prev = peers[short] ?: return
+        if (prev.bearingSource == BearingSource.UWB) return
+        val mine = ownFix ?: return
+        val distance = GeoMath.meters(mine.lat, mine.lng, fix.lat, fix.lng)
+        val relative = Angles.wrap180(GeoMath.bearing(mine.lat, mine.lng, fix.lat, fix.lng) - heading)
+        peers[short] = prev.copy(
+            geoMeters = distance,
+            geoAccuracy = maxOf(mine.accuracy, fix.accuracy),
+            azimuthDeg = relative,
+            bearingSource = BearingSource.GEO,
+            lastSeenElapsedMs = android.os.SystemClock.elapsedRealtime()
+        )
+        publish()
+    }
 
     override fun onSensorChanged(event: SensorEvent) {
         val rot = FloatArray(9)

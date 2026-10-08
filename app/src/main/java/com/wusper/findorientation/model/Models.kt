@@ -1,12 +1,14 @@
 package com.wusper.findorientation.model
 
-enum class BearingSource { NONE, SPIN, UWB }
+enum class BearingSource { NONE, SPIN, GEO, UWB }
 
 data class PeerSighting(
     val id: String,
     val name: String,
     val rssi: Int,
     val estimatedMeters: Float?,
+    val geoMeters: Float?,
+    val geoAccuracy: Float?,
     val uwbMeters: Float?,
     val azimuthDeg: Float?,
     val elevationDeg: Float?,
@@ -15,7 +17,7 @@ data class PeerSighting(
     val lastSeenElapsedMs: Long,
     val bleAddress: String
 ) {
-    val meters: Float? get() = uwbMeters ?: estimatedMeters
+    val meters: Float? get() = uwbMeters ?: geoMeters ?: estimatedMeters
     val withinTenMeters: Boolean get() = (meters ?: 99f) <= 10f
 }
 
@@ -24,6 +26,8 @@ data class FindState(
     val shortId: String = "----",
     val seeking: Boolean = false,
     val visible: Boolean = true,
+    val resident: Boolean = false,
+    val geoFallback: Boolean = true,
     val uwbHardware: Boolean = false,
     val headingDeg: Float = 0f,
     val peers: List<PeerSighting> = emptyList(),

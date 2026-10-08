@@ -21,6 +21,14 @@ class IdentityStore(context: Context) {
             prefs.edit().putString(KEY_NAME, value.trim().take(24).ifEmpty { displayName }).apply()
         }
 
+    var resident: Boolean
+        get() = prefs.getBoolean(KEY_RESIDENT, false)
+        set(value) { prefs.edit().putBoolean(KEY_RESIDENT, value).apply() }
+
+    var geoFallback: Boolean
+        get() = prefs.getBoolean(KEY_GEO, true)
+        set(value) { prefs.edit().putBoolean(KEY_GEO, value).apply() }
+
     fun idBytes(): ByteArray {
         val id = deviceId
         val out = ByteArray(16)
@@ -36,5 +44,7 @@ class IdentityStore(context: Context) {
     companion object {
         private const val KEY_ID = "device_id"
         private const val KEY_NAME = "display_name"
+        private const val KEY_RESIDENT = "resident"
+        private const val KEY_GEO = "geo_fallback"
     }
 }

@@ -3,8 +3,11 @@ package com.wusper.findorientation
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -44,9 +47,23 @@ class MainActivity : ComponentActivity() {
                     missingPermissions = missing,
                     onRequestPermissions = { request.launch(permissions.toTypedArray()) },
                     onStart = {
+                        (application as FindApp).repository.setResident(true)
                         startForegroundService(Intent(this, FindService::class.java))
                     },
-                    onStop = { stopService(Intent(this, FindService::class.java)) }
+                    onStop = {
+                        (application as FindApp).repository.setResident(false)
+                        stopService(Intent(this, FindService::class.java))
+                    },
+                    batteryRestricted = !getSystemService(PowerManager::class.java)
+                        .isIgnoringBatteryOptimizations(packageName),
+                    onRequestBattery = {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    }
                 )
             }
         }
