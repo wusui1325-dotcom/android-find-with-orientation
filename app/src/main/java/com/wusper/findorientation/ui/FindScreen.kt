@@ -31,6 +31,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -204,6 +205,10 @@ private fun PeerRow(peer: PeerSighting) {
         BearingSource.GEO -> "融合定位 ±${peer.geoAccuracy?.toInt() ?: "?"} 米"
         BearingSource.SPIN -> "旋轉估計"
         BearingSource.NONE -> "只有距離"
+        BearingSource.WIFI_RTT -> "WiFi RTT"
+        BearingSource.BLE_CS -> "BLE Channel Sounding"
+        BearingSource.ULTRASONIC -> "超聲波"
+        BearingSource.IR -> "紅外"
     }
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         Text(peer.name, fontSize = 16.sp)

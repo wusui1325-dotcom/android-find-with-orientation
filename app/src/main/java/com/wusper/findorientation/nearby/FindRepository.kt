@@ -61,7 +61,7 @@ class FindRepository(context: Context) : SensorEventListener {
             irMgr?.hasIrEmitter() == true
         }.getOrDefault(false)
         return com.wusper.findorientation.model.HardwareSupport(
-            uwb = pm.hasSystemFeature(PackageManager.FEATURE_UWB)
+            uwb = uwb,
             wifiRtt = wifiRtt,
             bleChannelSounding = bleCs,
             gps = gps,
