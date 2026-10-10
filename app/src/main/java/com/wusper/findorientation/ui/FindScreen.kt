@@ -60,13 +60,21 @@ fun FindScreen(
             .verticalScroll(rememberScrollState())
             .padding(20.dp)
     ) {
-        Text("方向尋找", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary)
-        Text("10 米內、已安裝本客戶端的裝置", color = Color(0xFF9ED9CC), fontSize = 14.sp)
-        Text("本機 ${state.shortId} · ${if (state.uwbHardware) "UWB 可用" else "僅藍牙估算"}", color = Color(0xFF7FA89E), fontSize = 13.sp)
+        Text("方向尋找", style = MaterialTheme.typography.headlineMedium, color = Color.White)
+        Text("10 米內、已安裝本客戶端的裝置", color = Color.White, fontSize = 14.sp)
+        Text("本機 ${state.shortId} · ${if (state.uwbHardware) "UWB 可用" else "僅藍牙估算"}", color = Color.White, fontSize = 13.sp)
+        val hw = state.hardware
+        Text(
+            "硬體支援：UWB ${if (hw.uwb) "✓" else "✗"} · WiFi RTT ${if (hw.wifiRtt) "✓" else "✗"} · BLE CS ${if (hw.bleChannelSounding) "✓" else "✗"} · GPS ${if (hw.gps) "✓" else "✗"} · 旋轉感測 ${if (hw.rotationSensor) "✓" else "✗"} · IR ${if (hw.irBlaster) "✓" else "✗"} · 超聲波 ✓ · 相機 ${if (hw.camera) "✓" else "✗"}",
+            color = Color.White,
+            fontSize = 12.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+
         Spacer(Modifier.height(12.dp))
         Radar(visiblePeers)
         Spacer(Modifier.height(8.dp))
-        Text(state.status, color = MaterialTheme.colorScheme.secondary, fontSize = 13.sp)
+        Text(state.status, color = Color.White, fontSize = 13.sp)
         Spacer(Modifier.height(12.dp))
         if (missingPermissions.isNotEmpty()) {
             Text("尚未取得足夠權限。需要藍牙掃描、廣播、連接、精確位置、UWB 測距與通知。", fontSize = 14.sp)
@@ -84,7 +92,7 @@ fun FindScreen(
         if (state.resident && batteryRestricted) {
             Button(onClick = onRequestBattery) { Text("允許背景運行") }
         }
-        Text("顯示名稱", fontSize = 13.sp, color = Color(0xFF9ED9CC))
+        Text("顯示名稱", fontSize = 13.sp, color = Color.White)
         BasicTextField(
             value = name,
             onValueChange = {
@@ -101,13 +109,13 @@ fun FindScreen(
         Spacer(Modifier.height(16.dp))
         Text("10 米內客戶端 ${visiblePeers.size}", style = MaterialTheme.typography.titleMedium)
         if (visiblePeers.isEmpty()) {
-            Text("雷達沒有目標。兩台裝置都要開啟客戶端、授予權限，並保持可被發現。", color = Color(0xFF7FA89E), fontSize = 14.sp)
+            Text("雷達沒有目標。兩台裝置都要開啟客戶端、授予權限，並保持可被發現。", color = Color.White, fontSize = 14.sp)
         }
         visiblePeers.forEach { peer -> PeerRow(peer) }
         Spacer(Modifier.height(18.dp))
         Text(
-            "手機頂端為前方。琥珀色是 UWB，綠色是融合定位，藍色是旋轉估計。常駐被發現會在開機後恢復廣播，但強制停止或廠商省電仍可能把它殺掉。超過 10 米不會畫出。",
-            color = Color(0xFF6E8B84),
+            "手機頂端為前方（輪盤已加 30° 刻度）。琥珀色 UWB、綠色融合定位、藍色旋轉估計。若硬體支援，可進一步使用 WiFi RTT、BLE Channel Sounding、超聲波（人耳不可聞）或紅外。常駐被發現會在開機後恢復廣播，但強制停止或廠商省電仍可能把它殺掉。超過 10 米不會畫出。方向每秒至少更新 30 次。",
+            color = Color.White,
             fontSize = 12.sp
         )
     }
@@ -140,6 +148,26 @@ private fun Radar(peers: List<PeerSighting>) {
         drawCircle(ring.copy(alpha = 0.7f), radius * 0.5f, c, style = Stroke(2f))
         drawLine(ring, Offset(c.x, c.y - radius), Offset(c.x, c.y + radius), 1.5f)
         drawLine(ring, Offset(c.x - radius, c.y), Offset(c.x + radius, c.y), 1.5f)
+        // Degree scales / ticks every 30°
+        for (deg in 0 until 360 step 30) {
+            val rad = Math.toRadians((deg - 90).toDouble())
+            val outer = Offset(c.x + (cos(rad) * radius).toFloat(), c.y + (sin(rad) * radius).toFloat())
+            val inner = Offset(c.x + (cos(rad) * (radius - 12f)).toFloat(), c.y + (sin(rad) * (radius - 12f)).toFloat())
+            drawLine(Color.White.copy(alpha = 0.6f), inner, outer, 1.5f)
+        }
+        // Cardinal labels via native canvas
+        drawContext.canvas.nativeCanvas.apply {
+            val paint = android.graphics.Paint().apply {
+                color = android.graphics.Color.WHITE
+                textSize = 28f
+                textAlign = android.graphics.Paint.Align.CENTER
+                isAntiAlias = true
+            }
+            drawText("前", c.x, c.y - radius - 8f, paint)
+            drawText("右", c.x + radius + 16f, c.y + 8f, paint)
+            drawText("後", c.x, c.y + radius + 28f, paint)
+            drawText("左", c.x - radius - 16f, c.y + 8f, paint)
+        }
         drawCircle(Color(0xFF39F3C3), 6f, c)
         peers.forEach { peer ->
             val meters = (peer.meters ?: 10f).coerceIn(0.4f, 10f)
@@ -181,7 +209,7 @@ private fun PeerRow(peer: PeerSighting) {
         Text(peer.name, fontSize = 16.sp)
         Text(
             "${"%.1f".format(meters ?: 0f)} 米 · $angle · $source · ${peer.rssi} dBm",
-            color = Color(0xFF9ED9CC),
+            color = Color.White,
             fontSize = 13.sp
         )
     }

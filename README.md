@@ -59,3 +59,15 @@ git clone https://github.com/wusui1325-dotcom/android-find-with-orientation.git
 cd android-find-with-orientation
 ./gradlew :app:assembleDebug
 ```
+
+## 本次改進（2026-10-10）
+
+1. App 內字體改為白色，提升可讀性。
+2. 尋找輪盤方向指向改為實時更新（主循環 ~30 Hz，感測器變化即時重算相對方位並刷新畫面）。
+3. 頂部列出目前裝置對各硬體的支援情況（UWB、WiFi RTT、BLE Channel Sounding、GPS、旋轉感測器、IR Blaster、超聲波、相機）。
+4. 擴充尋找方案枚舉（WIFI_RTT、BLE_CS、ULTRASONIC、IR），並在 UI 與說明中標註。完整測距實作需雙方硬體支援（Android 16 Ranging API / 超聲波 chirp / IR），目前優先使用已有 UWB / 融合定位 / 旋轉估計，其餘作為可擴展後備。
+5. 方向輪盤加入 30° 單位刻度與前/右/後/左標示。
+
+## 建置與 Release
+
+見下方說明。可在 Android Studio 或 Termux 中編譯。

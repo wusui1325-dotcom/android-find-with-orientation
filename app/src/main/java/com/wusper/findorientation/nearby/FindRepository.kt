@@ -1,6 +1,9 @@
 package com.wusper.findorientation.nearby
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.hardware.ConsumerIrManager
+import android.os.Build
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -43,6 +46,32 @@ class FindRepository(context: Context) : SensorEventListener {
     private var loop: Job? = null
     private var controllerReady = false
 
+    private fun detectHardware(): com.wusper.findorientation.model.HardwareSupport {
+        val pm = app.packageManager
+        val uwb = pm.hasSystemFeature(PackageManager.FEATURE_UWB)
+        val wifiRtt = pm.hasSystemFeature(PackageManager.FEATURE_WIFI_RTT)
+        val bleCs = if (Build.VERSION.SDK_INT >= 36) {
+            pm.hasSystemFeature("android.hardware.bluetooth_le.channel_sounding")
+        } else false
+        val gps = locations.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                  locations.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        val rot = sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR) != null
+        val ir = runCatching {
+            val irMgr = app.getSystemService(ConsumerIrManager::class.java)
+            irMgr?.hasIrEmitter() == true
+        }.getOrDefault(false)
+        return com.wusper.findorientation.model.HardwareSupport(
+            uwb = pm.hasSystemFeature(PackageManager.FEATURE_UWB)
+            wifiRtt = wifiRtt,
+            bleChannelSounding = bleCs,
+            gps = gps,
+            rotationSensor = rot,
+            irBlaster = ir,
+            ultrasonicCapable = true,
+            camera = pm.hasSystemFeature(PackageManager.FEATURE_CAMERA)
+        )
+    }
+
     private val uwb = UwbRanger(app, scope, ::onUwbFix) { setStatus(it) }
     private val ble = BleStack(
         app,
@@ -60,7 +89,8 @@ class FindRepository(context: Context) : SensorEventListener {
             shortId = Proto.hex(identity.idBytes().copyOfRange(0, 4)),
             resident = identity.resident,
             geoFallback = identity.geoFallback,
-            uwbHardware = uwb.hardware
+            uwbHardware = uwb.hardware,
+            hardware = detectHardware()
         )
     )
     val state: StateFlow<FindState> = _state
@@ -106,7 +136,7 @@ class FindRepository(context: Context) : SensorEventListener {
                 prune()
                 publishOwnLocation()
                 publish()
-                delay(400)
+                delay(33)  // ~30 Hz for real-time direction
             }
         }
         setStatus(if (uwb.hardware) "尋找中。此機支援 UWB 角度" else "尋找中。無 UWB 時用融合定位，室內再靠旋轉估計")
@@ -351,11 +381,13 @@ class FindRepository(context: Context) : SensorEventListener {
         if (prev.bearingSource == BearingSource.UWB) return
         val mine = ownFix ?: return
         val distance = GeoMath.meters(mine.lat, mine.lng, fix.lat, fix.lng)
-        val relative = Angles.wrap180(GeoMath.bearing(mine.lat, mine.lng, fix.lat, fix.lng) - heading)
+        val worldBearing = GeoMath.bearing(mine.lat, mine.lng, fix.lat, fix.lng)
+        val relative = Angles.wrap180(worldBearing - heading)
         peers[short] = prev.copy(
             geoMeters = distance,
             geoAccuracy = maxOf(mine.accuracy, fix.accuracy),
             azimuthDeg = relative,
+            worldBearingDeg = worldBearing,
             bearingSource = BearingSource.GEO,
             lastSeenElapsedMs = android.os.SystemClock.elapsedRealtime()
         )
@@ -367,7 +399,20 @@ class FindRepository(context: Context) : SensorEventListener {
         SensorManager.getRotationMatrixFromVector(rot, event.values)
         val ori = FloatArray(3)
         SensorManager.getOrientation(rot, ori)
-        heading = Math.toDegrees(ori[0].toDouble()).toFloat()
+        val newHeading = Math.toDegrees(ori[0].toDouble()).toFloat()
+        if (kotlin.math.abs(newHeading - heading) > 0.5f || true) {
+            heading = newHeading
+            // Recompute relative azimuth from world bearing for real-time pointing
+            peers.keys.toList().forEach { key ->
+                val p = peers[key] ?: return@forEach
+                val world = p.worldBearingDeg
+                if (world != null) {
+                    val relative = Angles.wrap180(world - heading)
+                    peers[key] = p.copy(azimuthDeg = relative)
+                }
+            }
+            publish()
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
