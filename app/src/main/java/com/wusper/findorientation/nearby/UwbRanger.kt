@@ -104,7 +104,7 @@ class UwbRanger(
         subSessionKeyInfo = null,
         complexChannel = UwbComplexChannel(channel, preamble),
         peerDevices = peers.map { UwbDevice.createForAddress(it.copyOf(2)) },
-        updateRateType = RangingParameters.RANGING_UPDATE_RATE_AUTOMATIC,
+        updateRateType = RangingParameters.RANGING_UPDATE_RATE_FREQUENT,
         uwbRangeDataNtfConfig = null,
         slotDurationMillis = RangingParameters.RANGING_SLOT_DURATION_2_MILLIS,
         isAoaDisabled = false

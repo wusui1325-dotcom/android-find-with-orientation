@@ -125,8 +125,12 @@ class FindRepository(context: Context) : SensorEventListener {
     fun start() {
         if (running) return
         running = true
-        sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)?.let {
-            sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+        // Aggressive sensor: prefer rotation vector, fall back to game / geomagnetic for max device compatibility
+        val rot = sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+            ?: sensors.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+            ?: sensors.getDefaultSensor(Sensor.TYPE_GEOMAGNETIC_ROTATION_VECTOR)
+        rot?.let {
+            sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
         }
         if (identity.resident) _state.update { it.copy(resident = true, visible = true) }
         listenLocation()
@@ -136,10 +140,10 @@ class FindRepository(context: Context) : SensorEventListener {
                 prune()
                 publishOwnLocation()
                 publish()
-                delay(33)  // ~30 Hz for real-time direction
+                delay(8)  // ~120 Hz aggressive real-time direction wheel
             }
         }
-        setStatus(if (uwb.hardware) "尋找中。此機支援 UWB 角度" else "尋找中。無 UWB 時用融合定位，室內再靠旋轉估計")
+        setStatus(if (uwb.hardware) "尋找中。此機支援 UWB 角度（高更新率）" else "尋找中。無 UWB 時用融合定位／旋轉估計（高更新率）")
     }
 
     fun stop() {
@@ -363,7 +367,7 @@ class FindRepository(context: Context) : SensorEventListener {
         if (!fine) return
         listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach { provider ->
             if (locations.isProviderEnabled(provider)) {
-                runCatching { locations.requestLocationUpdates(provider, 1000L, 0f, locationListener) }
+                runCatching { locations.requestLocationUpdates(provider, 500L, 0f, locationListener) }
             }
         }
     }
@@ -400,15 +404,19 @@ class FindRepository(context: Context) : SensorEventListener {
         val ori = FloatArray(3)
         SensorManager.getOrientation(rot, ori)
         val newHeading = Math.toDegrees(ori[0].toDouble()).toFloat()
-        if (kotlin.math.abs(newHeading - heading) > 0.5f || true) {
+        val delta = Angles.wrap180(newHeading - heading)
+        if (kotlin.math.abs(delta) > 0.1f) {
             heading = newHeading
-            // Recompute relative azimuth from world bearing for real-time pointing
+            // Real-time relative azimuth update for smooth wheel pointing
             peers.keys.toList().forEach { key ->
                 val p = peers[key] ?: return@forEach
-                val world = p.worldBearingDeg
-                if (world != null) {
-                    val relative = Angles.wrap180(world - heading)
-                    peers[key] = p.copy(azimuthDeg = relative)
+                val newAz = when {
+                    p.worldBearingDeg != null -> Angles.wrap180(p.worldBearingDeg - heading)
+                    p.azimuthDeg != null -> Angles.wrap180(p.azimuthDeg - delta)
+                    else -> null
+                }
+                if (newAz != null && newAz != p.azimuthDeg) {
+                    peers[key] = p.copy(azimuthDeg = newAz)
                 }
             }
             publish()

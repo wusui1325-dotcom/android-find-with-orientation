@@ -115,7 +115,7 @@ fun FindScreen(
         visiblePeers.forEach { peer -> PeerRow(peer) }
         Spacer(Modifier.height(18.dp))
         Text(
-            "手機頂端為前方（輪盤已加 30° 刻度）。琥珀色 UWB、綠色融合定位、藍色旋轉估計。若硬體支援，可進一步使用 WiFi RTT、BLE Channel Sounding、超聲波（人耳不可聞）或紅外。常駐被發現會在開機後恢復廣播，但強制停止或廠商省電仍可能把它殺掉。超過 10 米不會畫出。方向每秒至少更新 30 次。",
+            "手機頂端為前方（輪盤已加 30° 刻度）。琥珀色 UWB、綠色融合定位、藍色旋轉估計。若硬體支援，可進一步使用 WiFi RTT、BLE Channel Sounding、超聲波（人耳不可聞）或紅外。常駐被發現會在開機後恢復廣播，但強制停止或廠商省電仍可能把它殺掉。超過 10 米不會畫出。方向更新已激進優化至約 120 Hz，全感測器後備適配，旋轉超跟手。",
             color = Color.White,
             fontSize = 12.sp
         )
