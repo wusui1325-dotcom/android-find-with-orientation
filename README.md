@@ -4,7 +4,7 @@
 
 公開倉庫：<https://github.com/wusui1325-dotcom/android-find-with-orientation>
 
-目前版本：**1.2.0**（versionCode 3）
+目前版本：**1.2.1**（versionCode 4）
 
 ## 它做什麼
 
@@ -66,6 +66,10 @@ cd android-find-with-orientation
 ```
 
 Release 建置已開啟 R8 縮減與資源壓縮。
+
+## 1.2.1 更新
+
+- 修復開啟即閃退：`MainActivity` 不能在構造時使用 `packageManager`（Context 尚未附加）。
 
 ## 1.2.0 更新
 

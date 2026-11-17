@@ -23,7 +23,10 @@ import com.wusper.findorientation.ui.FindScreen
 import com.wusper.findorientation.ui.FindTheme
 
 class MainActivity : ComponentActivity() {
-    private val permissions = buildList {
+    // Must be lazy: Activity context (and packageManager) is null during <init>.
+    private val permissions: List<String> by lazy { buildPermissionList() }
+
+    private fun buildPermissionList(): List<String> = buildList {
         add(Manifest.permission.BLUETOOTH_SCAN)
         add(Manifest.permission.BLUETOOTH_ADVERTISE)
         add(Manifest.permission.BLUETOOTH_CONNECT)
