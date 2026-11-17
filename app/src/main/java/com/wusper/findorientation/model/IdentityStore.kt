@@ -16,9 +16,9 @@ class IdentityStore(context: Context) {
         }
 
     var displayName: String
-        get() = prefs.getString(KEY_NAME, null) ?: "裝置-${deviceId.toString().take(4).uppercase()}"
+        get() = prefs.getString(KEY_NAME, null) ?: defaultName(deviceId)
         set(value) {
-            prefs.edit().putString(KEY_NAME, value.trim().take(24).ifEmpty { displayName }).apply()
+            prefs.edit().putString(KEY_NAME, sanitizeName(value, displayName)).apply()
         }
 
     var resident: Boolean
@@ -28,6 +28,10 @@ class IdentityStore(context: Context) {
     var geoFallback: Boolean
         get() = prefs.getBoolean(KEY_GEO, true)
         set(value) { prefs.edit().putBoolean(KEY_GEO, value).apply() }
+
+    var headingCue: Boolean
+        get() = prefs.getBoolean(KEY_CUE, false)
+        set(value) { prefs.edit().putBoolean(KEY_CUE, value).apply() }
 
     fun idBytes(): ByteArray {
         val id = deviceId
@@ -46,5 +50,14 @@ class IdentityStore(context: Context) {
         private const val KEY_NAME = "display_name"
         private const val KEY_RESIDENT = "resident"
         private const val KEY_GEO = "geo_fallback"
+        private const val KEY_CUE = "heading_cue"
+
+        const val NAME_MAX_CHARS = 24
+
+        fun defaultName(deviceId: UUID): String =
+            "裝置-${deviceId.toString().take(4).uppercase()}"
+
+        fun sanitizeName(input: String, fallback: String): String =
+            input.trim().take(NAME_MAX_CHARS).ifEmpty { fallback }
     }
 }

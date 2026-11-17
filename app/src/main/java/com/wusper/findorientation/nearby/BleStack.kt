@@ -21,7 +21,11 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
+import java.util.ArrayDeque
 import java.util.UUID
 
 data class Sighting(
@@ -34,46 +38,69 @@ class BleStack(
     private val context: Context,
     private val onSighting: (Sighting) -> Unit,
     private val onIdentity: (address: String, Proto.Identity) -> Unit,
-    private val onAccept: (address: String, Proto.SessionAccept) -> Unit,
-    private val onOffer: (address: String, Proto.SessionOffer) -> Unit,
     private val onLocation: (address: String, Proto.GeoFix) -> Unit,
+    private val onSessionCommand: (address: String, Any) -> Unit,
+    private val onReady: (address: String) -> Unit,
     private val onLog: (String) -> Unit
 ) {
+    private val main = Handler(Looper.getMainLooper())
+    private val lock = Any()
     private val manager = context.getSystemService(BluetoothManager::class.java)
     private val adapter: BluetoothAdapter? = manager?.adapter
     private val scanner: BluetoothLeScanner? = adapter?.bluetoothLeScanner
     private val advertiser = adapter?.bluetoothLeAdvertiser
     private var gattServer: BluetoothGattServer? = null
     private val clients = linkedMapOf<String, BluetoothGatt>()
+    private val ready = hashSetOf<String>()
     private val centrals = linkedMapOf<String, BluetoothDevice>()
+    private val retries = hashMapOf<String, Int>()
+    private val writes = ArrayDeque<Pair<String, ByteArray>>()
+    private var writing = false
     private var identityPayload = ByteArray(0)
+    private var advertPayload = ByteArray(0)
     private var acceptPayload: ByteArray? = null
     private var locationPayload = ByteArray(0)
+    private var scanning = false
+    private var advertising = false
+    private var wantConnections = false
     private val parcel = ParcelUuid(Proto.SERVICE)
     private val cccd = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block() else main.post(block)
+    }
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val data = result.scanRecord?.getServiceData(parcel) ?: return
             val advert = Proto.parseAdvert(data) ?: return
-            onSighting(Sighting(result.device.address, result.rssi, advert))
+            onMain { onSighting(Sighting(result.device.address, result.rssi, advert)) }
         }
 
         override fun onScanFailed(errorCode: Int) {
-            onLog("掃描失敗 $errorCode")
+            onMain { onLog("掃描失敗 $errorCode") }
         }
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartFailure(errorCode: Int) {
-            onLog("廣播失敗 $errorCode")
+            advertising = false
+            onMain { onLog("廣播失敗 $errorCode") }
+        }
+
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            advertising = true
         }
     }
 
     private val serverCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) centrals[device.address] = device
-            if (newState == BluetoothProfile.STATE_DISCONNECTED) centrals.remove(device.address)
+            if (newState == BluetoothProfile.STATE_CONNECTED) {
+                synchronized(lock) { centrals[device.address] = device }
+            }
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                synchronized(lock) { centrals.remove(device.address) }
+            }
         }
 
         @Suppress("DEPRECATION")
@@ -106,7 +133,7 @@ class BleStack(
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
             }
             val parsed = Proto.parseSession(value) ?: return
-            if (parsed is Proto.SessionOffer) onOffer(device.address, parsed)
+            onMain { onSessionCommand(device.address, parsed) }
         }
 
         override fun onDescriptorWriteRequest(
@@ -132,57 +159,132 @@ class BleStack(
     fun publishLocation(payload: ByteArray) {
         locationPayload = payload
         val ch = gattServer?.getService(Proto.SERVICE)?.getCharacteristic(Proto.LOCATION) ?: return
-        @Suppress("DEPRECATION")
-        ch.value = payload
-        centrals.values.forEach { device ->
-            runCatching { gattServer?.notifyCharacteristicChanged(device, ch, false) }
-        }
+        notifyAll(ch, payload)
     }
 
     @SuppressLint("MissingPermission")
     fun publishAccept(payload: ByteArray) {
         acceptPayload = payload
-        val service = gattServer?.getService(Proto.SERVICE) ?: return
-        val ch = service.getCharacteristic(Proto.SESSION) ?: return
-        @Suppress("DEPRECATION")
-        ch.value = payload
-        centrals.values.forEach { device ->
-            runCatching { gattServer?.notifyCharacteristicChanged(device, ch, false) }
+        val ch = gattServer?.getService(Proto.SERVICE)?.getCharacteristic(Proto.SESSION) ?: return
+        notifyAll(ch, payload)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun notifyAll(ch: BluetoothGattCharacteristic, payload: ByteArray) {
+        val devices = synchronized(lock) { centrals.values.toList() }
+        devices.forEach { device ->
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    gattServer?.notifyCharacteristicChanged(device, ch, false, payload)
+                } else {
+                    @Suppress("DEPRECATION")
+                    ch.value = payload
+                    @Suppress("DEPRECATION")
+                    gattServer?.notifyCharacteristicChanged(device, ch, false)
+                }
+            }
+        }
+    }
+
+    /**
+     * Start or refresh advertising / scanning without tearing down the GATT server or
+     * existing client connections.
+     */
+    @SuppressLint("MissingPermission")
+    fun startRadio(identity: ByteArray, advert: ByteArray, scan: Boolean, aggressive: Boolean) {
+        identityPayload = identity
+        advertPayload = advert
+        wantConnections = scan
+        openServer()
+        restartAdvert(advert, aggressive)
+        if (scan) startScan(aggressive) else stopScan()
+        onMain {
+            onLog(
+                if (scan) {
+                    if (aggressive) "藍牙廣播與掃描已開始（尋找模式）" else "藍牙廣播與掃描已開始"
+                } else {
+                    "常駐廣播已開始，等待其他客戶端尋找"
+                }
+            )
         }
     }
 
     @SuppressLint("MissingPermission")
-    fun start(identity: ByteArray, advert: ByteArray, scan: Boolean) {
-        identityPayload = identity
-        openServer()
+    fun updateAdvert(advert: ByteArray, aggressive: Boolean) {
+        advertPayload = advert
+        restartAdvert(advert, aggressive)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun restartAdvert(advert: ByteArray, aggressive: Boolean) {
+        stopAdvert()
         val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .setAdvertiseMode(
+                if (aggressive) AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
+                else AdvertiseSettings.ADVERTISE_MODE_LOW_POWER
+            )
+            .setTxPowerLevel(
+                if (aggressive) AdvertiseSettings.ADVERTISE_TX_POWER_HIGH
+                else AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM
+            )
             .setConnectable(true)
             .build()
         val data = AdvertiseData.Builder().addServiceUuid(parcel).setIncludeDeviceName(false).build()
         val scanResponse = AdvertiseData.Builder().addServiceData(parcel, advert).build()
-        advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
-        if (scan) {
-            val filters = listOf(ScanFilter.Builder().setServiceUuid(parcel).build())
-            val scanSettings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
-            scanner?.startScan(filters, scanSettings, scanCallback)
-            onLog("藍牙廣播與掃描已開始")
-        } else {
-            onLog("常駐廣播已開始，等待其他客戶端尋找")
-        }
+        runCatching { advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback) }
     }
 
     @SuppressLint("MissingPermission")
+    private fun startScan(aggressive: Boolean) {
+        stopScan()
+        val filters = listOf(ScanFilter.Builder().setServiceUuid(parcel).build())
+        val scanSettings = ScanSettings.Builder()
+            .setScanMode(
+                if (aggressive) ScanSettings.SCAN_MODE_LOW_LATENCY
+                else ScanSettings.SCAN_MODE_BALANCED
+            )
+            .build()
+        runCatching { scanner?.startScan(filters, scanSettings, scanCallback) }
+        scanning = true
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun stopScan() {
+        if (!scanning) {
+            runCatching { scanner?.stopScan(scanCallback) }
+            return
+        }
+        runCatching { scanner?.stopScan(scanCallback) }
+        scanning = false
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun stopAdvert() {
+        runCatching { advertiser?.stopAdvertising(advertiseCallback) }
+        advertising = false
+    }
+
+    fun isConnected(address: String): Boolean = synchronized(lock) { address in ready }
+
+    @SuppressLint("MissingPermission")
     fun connect(address: String) {
-        if (clients.containsKey(address)) return
-        val device = adapter?.getRemoteDevice(address) ?: return
-        val gatt = device.connectGatt(context, false, object : BluetoothGattCallback() {
+        synchronized(lock) {
+            if (clients.containsKey(address)) return
+        }
+        val device = runCatching { adapter?.getRemoteDevice(address) }.getOrNull() ?: return
+        val callback = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-                if (newState == BluetoothProfile.STATE_CONNECTED) g.discoverServices()
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    synchronized(lock) { retries[address] = 0 }
+                    g.discoverServices()
+                }
                 if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    clients.remove(address)
+                    synchronized(lock) {
+                        clients.remove(address)
+                        ready.remove(address)
+                    }
                     runCatching { g.close() }
+                    maybeRetry(address)
                 }
             }
 
@@ -200,7 +302,9 @@ class BleStack(
             ) {
                 if (characteristic.uuid == Proto.IDENTITY && status == BluetoothGatt.GATT_SUCCESS) {
                     val value = characteristic.value ?: return
-                    Proto.parseIdentity(value)?.let { onIdentity(address, it) }
+                    Proto.parseIdentity(value)?.let { parsed ->
+                        onMain { onIdentity(address, parsed) }
+                    }
                     val session = g.getService(Proto.SERVICE)?.getCharacteristic(Proto.SESSION) ?: return
                     g.setCharacteristicNotification(session, true)
                     val location = g.getService(Proto.SERVICE)?.getCharacteristic(Proto.LOCATION)
@@ -215,13 +319,23 @@ class BleStack(
             @Suppress("DEPRECATION")
             override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
                 val service = g.getService(Proto.SERVICE) ?: return
-                val location = service.getCharacteristic(Proto.LOCATION) ?: return
-                if (descriptor.characteristic.uuid == Proto.SESSION) {
+                val location = service.getCharacteristic(Proto.LOCATION)
+                if (descriptor.characteristic.uuid == Proto.SESSION && location != null) {
                     location.getDescriptor(cccd)?.let { desc ->
                         desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                         g.writeDescriptor(desc)
+                        return
                     }
                 }
+                markReady(address)
+            }
+
+            override fun onCharacteristicWrite(
+                g: BluetoothGatt,
+                characteristic: BluetoothGattCharacteristic,
+                status: Int
+            ) {
+                onMain { drainWrite() }
             }
 
             @Suppress("DEPRECATION")
@@ -230,33 +344,96 @@ class BleStack(
                 when (characteristic.uuid) {
                     Proto.SESSION -> {
                         val parsed = Proto.parseSession(value) ?: return
-                        if (parsed is Proto.SessionAccept) onAccept(address, parsed)
+                        onMain { onSessionCommand(address, parsed) }
                     }
-                    Proto.LOCATION -> Proto.parseGeo(value)?.let { onLocation(address, it) }
+                    Proto.LOCATION -> Proto.parseGeo(value)?.let { fix ->
+                        onMain { onLocation(address, fix) }
+                    }
                 }
             }
-        }, BluetoothDevice.TRANSPORT_LE)
-        clients[address] = gatt
+        }
+        val gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+        synchronized(lock) { clients[address] = gatt }
+    }
+
+    private fun markReady(address: String) {
+        val first = synchronized(lock) { ready.add(address) }
+        if (first) onMain {
+            onReady(address)
+            drainWrite()
+        }
+    }
+
+    private fun maybeRetry(address: String) {
+        if (!wantConnections) return
+        val attempt = synchronized(lock) { retries[address] ?: 0 }
+        if (attempt >= 3) return
+        synchronized(lock) { retries[address] = attempt + 1 }
+        val delayMs = 1000L shl attempt
+        main.postDelayed({ connect(address) }, delayMs)
+    }
+
+    fun writeSession(address: String, payload: ByteArray) {
+        onMain {
+            writes.addLast(address to payload)
+            drainWrite()
+        }
     }
 
     @SuppressLint("MissingPermission")
-    fun writeOffer(address: String, payload: ByteArray) {
-        val gatt = clients[address] ?: return
-        val ch = gatt.getService(Proto.SERVICE)?.getCharacteristic(Proto.SESSION) ?: return
-        @Suppress("DEPRECATION")
-        ch.value = payload
-        ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        @Suppress("DEPRECATION")
-        gatt.writeCharacteristic(ch)
+    private fun drainWrite() {
+        if (writing) return
+        val next = writes.pollFirst() ?: return
+        val (address, payload) = next
+        val gatt = synchronized(lock) { clients[address] }
+        if (gatt == null || address !in synchronized(lock) { ready }) {
+            // Put it back and wait for the connection to become ready, unless we have no client at all.
+            if (gatt != null) writes.addFirst(address to payload)
+            return
+        }
+        val ch = gatt.getService(Proto.SERVICE)?.getCharacteristic(Proto.SESSION) ?: run {
+            writes.addFirst(address to payload)
+            return
+        }
+        writing = true
+        val ok = runCatching {
+            if (Build.VERSION.SDK_INT >= 33) {
+                gatt.writeCharacteristic(ch, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) ==
+                    BluetoothGatt.GATT_SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                ch.value = payload
+                ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                @Suppress("DEPRECATION")
+                gatt.writeCharacteristic(ch)
+            }
+        }.getOrDefault(false)
+        if (!ok) {
+            writing = false
+            drainWrite()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun stopRadio() {
+        wantConnections = false
+        main.removeCallbacksAndMessages(null)
+        stopScan()
+        stopAdvert()
     }
 
     @SuppressLint("MissingPermission")
     fun stop() {
-        runCatching { scanner?.stopScan(scanCallback) }
-        runCatching { advertiser?.stopAdvertising(advertiseCallback) }
-        clients.values.forEach { runCatching { it.close() } }
-        clients.clear()
-        centrals.clear()
+        stopRadio()
+        synchronized(lock) {
+            clients.values.forEach { runCatching { it.close() } }
+            clients.clear()
+            ready.clear()
+            centrals.clear()
+            retries.clear()
+            writes.clear()
+            writing = false
+        }
         runCatching { gattServer?.close() }
         gattServer = null
     }
@@ -301,5 +478,4 @@ class BleStack(
         server.addService(service)
         gattServer = server
     }
-
 }

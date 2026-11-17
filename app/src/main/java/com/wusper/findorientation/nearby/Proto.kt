@@ -13,6 +13,8 @@ object Proto {
     const val FLAG_UWB = 1
     const val OFFER = 1
     const val ACCEPT = 2
+    const val PING = 3
+    const val PING_STOP = 4
 
     data class Advert(val flags: Int, val shortId: ByteArray, val name: String)
     data class Identity(val id: ByteArray, val name: String, val uwb: Boolean)
@@ -25,9 +27,10 @@ object Proto {
     )
     data class SessionAccept(val id: ByteArray, val controleeAddress: ByteArray)
     data class GeoFix(val lat: Double, val lng: Double, val accuracy: Float, val heading: Float)
+    data class PingCommand(val start: Boolean, val timeoutSec: Int)
 
     fun advert(flags: Int, id: ByteArray, name: String): ByteArray {
-        val nameBytes = name.encodeToByteArray().take(7).toByteArray()
+        val nameBytes = Utf8.truncate(name, 7)
         return byteArrayOf(VERSION.toByte(), flags.toByte()) +
             id.copyOfRange(0, 4) +
             nameBytes
@@ -40,7 +43,7 @@ object Proto {
     }
 
     fun identity(id: ByteArray, name: String, uwb: Boolean): ByteArray {
-        val nameBytes = name.encodeToByteArray().take(24).toByteArray()
+        val nameBytes = Utf8.truncate(name, 24)
         return byteArrayOf(VERSION.toByte(), if (uwb) FLAG_UWB.toByte() else 0) + id.copyOf(16) + nameBytes
     }
 
@@ -68,6 +71,11 @@ object Proto {
         return byteArrayOf(ACCEPT.toByte()) + accept.id.copyOf(16) + accept.controleeAddress.copyOf(2)
     }
 
+    fun ping(timeoutSec: Int): ByteArray =
+        byteArrayOf(PING.toByte(), timeoutSec.coerceIn(3, 30).toByte())
+
+    fun pingStop(): ByteArray = byteArrayOf(PING_STOP.toByte())
+
     fun parseSession(data: ByteArray): Any? {
         if (data.isEmpty()) return null
         return when (data[0].toInt()) {
@@ -87,6 +95,11 @@ object Proto {
                 if (data.size < 19) return null
                 SessionAccept(data.copyOfRange(1, 17), data.copyOfRange(17, 19))
             }
+            PING -> {
+                val timeout = if (data.size > 1) data[1].toInt() and 0xff else 15
+                PingCommand(start = true, timeoutSec = timeout.coerceIn(3, 30))
+            }
+            PING_STOP -> PingCommand(start = false, timeoutSec = 0)
             else -> null
         }
     }

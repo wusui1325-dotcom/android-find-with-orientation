@@ -16,11 +16,19 @@ data class PeerSighting(
     val uwbCapable: Boolean,
     val lastSeenElapsedMs: Long,
     val bleAddress: String,
-    val worldBearingDeg: Float? = null  // absolute bearing for real-time relative update
+    val worldBearingDeg: Float? = null
 ) {
     val meters: Float? get() = uwbMeters ?: geoMeters ?: estimatedMeters
     val withinTenMeters: Boolean get() = (meters ?: 99f) <= 10f
 }
+
+data class LastSeenPeer(
+    val id: String,
+    val name: String,
+    val lastMeters: Float?,
+    val scheme: BearingSource,
+    val lastSeenElapsedMs: Long
+)
 
 data class HardwareSupport(
     val uwb: Boolean = false,
@@ -29,20 +37,33 @@ data class HardwareSupport(
     val gps: Boolean = false,
     val rotationSensor: Boolean = false,
     val irBlaster: Boolean = false,
-    val ultrasonicCapable: Boolean = true,  // mic + speaker almost always present
-    val camera: Boolean = true
+    val microphone: Boolean = false,
+    val speaker: Boolean = false,
+    val camera: Boolean = false
+)
+
+data class IncomingPing(
+    val fromAddress: String,
+    val fromName: String,
+    val timeoutSec: Int,
+    val startedElapsedMs: Long
 )
 
 data class FindState(
     val displayName: String = "未命名裝置",
     val shortId: String = "----",
+    val running: Boolean = false,
     val seeking: Boolean = false,
     val visible: Boolean = true,
     val resident: Boolean = false,
     val geoFallback: Boolean = true,
+    val headingCue: Boolean = false,
     val uwbHardware: Boolean = false,
-    val headingDeg: Float = 0f,
     val peers: List<PeerSighting> = emptyList(),
+    val lastSeen: List<LastSeenPeer> = emptyList(),
+    val selectedPeerId: String? = null,
+    val incomingPing: IncomingPing? = null,
+    val outgoingPingTo: String? = null,
     val status: String = "尚未開始",
     val hardware: HardwareSupport = HardwareSupport()
 )
