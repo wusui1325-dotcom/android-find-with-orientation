@@ -13,7 +13,9 @@ object SpinEstimator {
 
     /**
      * Approximate relative bearing after a slow turn: the heading where RSSI peaked,
-     * expressed relative to [heading] and limited to the phone-top field of view.
+     * expressed relative to [heading], over a full 360° so a rear peak can appear
+     * behind the user. Returns null until [minSamples] and [minSpanDeg] are met,
+     * so a tiny wiggle is not treated as a direction.
      */
     fun bearing(
         samples: List<Pair<Float, Int>>,
@@ -29,6 +31,6 @@ object SpinEstimator {
             deg to 10f.pow((rssi - maxRssi) / 8f)
         }
         val peak = Angles.weightedCircularMean(weighted) ?: return null
-        return Angles.wrap180(peak - heading).coerceIn(-90f, 90f)
+        return Angles.wrap180(peak - heading)
     }
 }

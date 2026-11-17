@@ -45,7 +45,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalFocusManager
@@ -57,7 +59,12 @@ import com.wusper.findorientation.model.BearingSource
 import com.wusper.findorientation.model.HardwareSupport
 import com.wusper.findorientation.model.LastSeenPeer
 import com.wusper.findorientation.model.PeerSighting
+import com.wusper.findorientation.nearby.Angles
+import com.wusper.findorientation.nearby.DirectionCue
+import com.wusper.findorientation.nearby.FindFocus
 import com.wusper.findorientation.nearby.FindRepository
+import com.wusper.findorientation.nearby.PointerSmoother
+import com.wusper.findorientation.nearby.SmoothedPointer
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -122,7 +129,7 @@ fun FindScreen(
         }
 
         Spacer(Modifier.height(12.dp))
-        RadarHost(repository, state.running && state.seeking)
+        RadarHost(repository, state.running && state.seeking, state.selectedPeerId)
         Spacer(Modifier.height(8.dp))
         Legend()
         Spacer(Modifier.height(6.dp))
@@ -415,24 +422,67 @@ private fun LegendDot(color: Color, label: String) {
 }
 
 @Composable
-private fun RadarHost(repository: FindRepository, active: Boolean) {
+private fun RadarHost(repository: FindRepository, active: Boolean, selectedPeerId: String?) {
     var peers by remember { mutableStateOf(repository.latestRadarPeers()) }
+    var poses by remember { mutableStateOf<Map<String, SmoothedPointer>>(emptyMap()) }
     LaunchedEffect(active) {
+        var lastFrame = 0L
         if (!active) {
-            peers = repository.latestRadarPeers()
+            val latest = repository.latestRadarPeers()
+            peers = latest
+            poses = PointerSmoother.stepAll(emptyMap(), latest, 1f)
             return@LaunchedEffect
         }
         while (true) {
-            withFrameNanos {
-                peers = repository.latestRadarPeers()
+            withFrameNanos { t ->
+                val dt = if (lastFrame == 0L) {
+                    1f / 60f
+                } else {
+                    ((t - lastFrame) / 1_000_000_000f).coerceIn(0f, 0.05f)
+                }
+                lastFrame = t
+                val latest = repository.latestRadarPeers()
+                peers = latest
+                poses = PointerSmoother.stepAll(poses, latest, Angles.frameAlpha(dt))
             }
         }
     }
-    Radar(peers)
+    val focused = FindFocus.focusedPeer(peers, selectedPeerId)
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Radar(peers, poses, focused?.id)
+        if (focused != null) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                DirectionCue.liveLine(focused),
+                color = White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
+            if (focused.azimuthDeg == null) {
+                val detail = buildString {
+                    append(focused.name)
+                    focused.meters?.let { append(" · "); append("%.1f".format(it)); append(" 米") }
+                }
+                Text(
+                    detail,
+                    color = Muted,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
+    }
 }
 
 @Composable
-private fun Radar(peers: List<PeerSighting>) {
+private fun Radar(
+    peers: List<PeerSighting>,
+    poses: Map<String, SmoothedPointer>,
+    focusedId: String?
+) {
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
@@ -466,29 +516,81 @@ private fun Radar(peers: List<PeerSighting>) {
         }
         drawCircle(Color(0xFF39F3C3), 6f, c)
         peers.forEach { peer ->
-            val meters = (peer.meters ?: 10f).coerceIn(0.4f, 10f)
-            val r = radius * (meters / 10f)
-            val deg = peer.azimuthDeg
+            val pose = poses[peer.id]
+            val r = radius * (pose?.radius ?: PointerSmoother.radiusOf(peer.meters))
+            val deg = pose?.azimuthDeg ?: peer.azimuthDeg
+            val color = when (peer.bearingSource) {
+                BearingSource.UWB -> UwbAmber
+                BearingSource.GEO -> GeoGreen
+                BearingSource.SPIN -> SpinBlue
+                else -> White.copy(alpha = 0.8f)
+            }
+            val focused = peer.id == focusedId
             if (deg == null) {
-                drawCircle(
-                    UwbAmber,
-                    r,
-                    c,
-                    style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f)))
-                )
+                if (focused) {
+                    drawCircle(
+                        color,
+                        r,
+                        c,
+                        style = Stroke(width = 3f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f)))
+                    )
+                }
             } else {
                 val rad = Math.toRadians(deg.toDouble() - 90.0)
                 val at = Offset(c.x + (cos(rad) * r).toFloat(), c.y + (sin(rad) * r).toFloat())
-                val color = when (peer.bearingSource) {
-                    BearingSource.UWB -> UwbAmber
-                    BearingSource.GEO -> GeoGreen
-                    else -> SpinBlue
+                if (focused) {
+                    drawCircle(color.copy(alpha = 0.20f), 28f, at)
+                    drawCircle(color.copy(alpha = 0.38f), 16f, at)
+                    drawLine(color.copy(alpha = 0.9f), c, at, 3.5f)
+                    drawChevron(at, deg, color, 22f)
+                    val mid = Offset(
+                        c.x + (cos(rad) * radius * 0.22f).toFloat(),
+                        c.y + (sin(rad) * radius * 0.22f).toFloat()
+                    )
+                    drawContext.canvas.nativeCanvas.apply {
+                        val paint = android.graphics.Paint().apply {
+                            this.color = android.graphics.Color.WHITE
+                            textSize = 26f
+                            textAlign = android.graphics.Paint.Align.CENTER
+                            isAntiAlias = true
+                            isFakeBoldText = true
+                        }
+                        val label = buildString {
+                            append(peer.name)
+                            peer.meters?.let { append("  "); append("%.1f".format(it)); append(" 米") }
+                        }
+                        drawText(label, mid.x, mid.y, paint)
+                    }
+                } else {
+                    drawCircle(color, 7f, at)
                 }
-                drawCircle(color, 9f, at)
-                drawLine(color, c, at, 2f)
             }
         }
     }
+}
+
+private fun DrawScope.drawChevron(at: Offset, azimuthDeg: Float, color: Color, size: Float) {
+    val rad = Math.toRadians(azimuthDeg.toDouble() - 90.0)
+    val dx = cos(rad).toFloat()
+    val dy = sin(rad).toFloat()
+    val px = -dy
+    val py = dx
+    val tip = Offset(at.x + dx * size, at.y + dy * size)
+    val left = Offset(
+        at.x - dx * size * 0.55f + px * size * 0.62f,
+        at.y - dy * size * 0.55f + py * size * 0.62f
+    )
+    val right = Offset(
+        at.x - dx * size * 0.55f - px * size * 0.62f,
+        at.y - dy * size * 0.55f - py * size * 0.62f
+    )
+    val path = Path().apply {
+        moveTo(tip.x, tip.y)
+        lineTo(left.x, left.y)
+        lineTo(right.x, right.y)
+        close()
+    }
+    drawPath(path, color)
 }
 
 @Composable
@@ -502,7 +604,7 @@ private fun PeerRow(
 ) {
     val meters = peer.meters
     val angle = peer.azimuthDeg?.let { "${it.toInt()}°" } ?: "角度未鎖定"
-    val source = sourceLabel(peer.bearingSource, peer.geoAccuracy)
+    val source = DirectionCue.sourceLabel(peer.bearingSource, peer.geoAccuracy)
     val shape = RoundedCornerShape(12.dp)
     Column(
         Modifier
@@ -549,20 +651,10 @@ private fun LastSeenRow(item: LastSeenPeer) {
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Text(item.name, fontSize = 15.sp, color = White)
         Text(
-            "$dist · ${sourceLabel(item.scheme, null)} · $agoText",
+            "$dist · ${DirectionCue.sourceLabel(item.scheme, null)} · $agoText",
             color = Muted,
             fontSize = 13.sp
         )
     }
 }
 
-private fun sourceLabel(source: BearingSource, geoAccuracy: Float?): String = when (source) {
-    BearingSource.UWB -> "UWB"
-    BearingSource.GEO -> "融合定位 ±${geoAccuracy?.toInt() ?: "?"} 米"
-    BearingSource.SPIN -> "旋轉估計"
-    BearingSource.NONE -> "只有距離"
-    BearingSource.WIFI_RTT -> "Wi-Fi RTT"
-    BearingSource.BLE_CS -> "藍牙通道探測"
-    BearingSource.ULTRASONIC -> "超聲波"
-    BearingSource.IR -> "紅外"
-}

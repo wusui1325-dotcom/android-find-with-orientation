@@ -51,6 +51,7 @@ class FindRepository(context: Context) : SensorEventListener {
     private val offered = hashSetOf<String>()
     private val pendingPing = hashSetOf<String>()
     private var heading = 0f
+    private var headingReady = false
     private var running = false
     private var radarActive = false
     private var sensorsOn = false
@@ -207,6 +208,7 @@ class FindRepository(context: Context) : SensorEventListener {
         alarmer.release()
         sensors.unregisterListener(this)
         sensorsOn = false
+        headingReady = false
         stopLocation()
         ble.stop()
         uwb.stop()
@@ -268,6 +270,17 @@ class FindRepository(context: Context) : SensorEventListener {
         val spinBearing = SpinEstimator.bearing(samples.toList(), heading)
         val locked = existing?.bearingSource == BearingSource.UWB ||
             (existing?.bearingSource == BearingSource.GEO && existing.geoMeters != null)
+        val existingWorld = existing?.worldBearingDeg
+        val azimuth = when {
+            locked && existingWorld != null -> Angles.relativeAzimuth(existingWorld, heading)
+            locked -> existing?.azimuthDeg
+            else -> spinBearing
+        }
+        val world = when {
+            locked -> existingWorld
+            spinBearing != null -> Angles.worldBearing(heading, spinBearing)
+            else -> existingWorld
+        }
         val updated = PeerSighting(
             id = existing?.id ?: short,
             name = existing?.name ?: sighting.advert.name.ifBlank { "客戶端 $short" },
@@ -276,7 +289,7 @@ class FindRepository(context: Context) : SensorEventListener {
             geoMeters = existing?.geoMeters,
             geoAccuracy = existing?.geoAccuracy,
             uwbMeters = existing?.uwbMeters,
-            azimuthDeg = if (locked) existing?.azimuthDeg else spinBearing,
+            azimuthDeg = azimuth,
             elevationDeg = existing?.elevationDeg,
             bearingSource = when {
                 existing?.bearingSource == BearingSource.UWB -> BearingSource.UWB
@@ -287,7 +300,7 @@ class FindRepository(context: Context) : SensorEventListener {
             uwbCapable = existing?.uwbCapable == true || sighting.advert.flags and Proto.FLAG_UWB != 0,
             lastSeenElapsedMs = SystemClock.elapsedRealtime(),
             bleAddress = sighting.address,
-            worldBearingDeg = existing?.worldBearingDeg
+            worldBearingDeg = world
         )
         peers[short] = updated
         remember(updated)
@@ -406,11 +419,13 @@ class FindRepository(context: Context) : SensorEventListener {
     private fun onUwbFix(fix: UwbFix) {
         val short = uwbKeyToId[fix.peerKey] ?: return
         val prev = peers[short] ?: return
+        val az = fix.azimuthDeg
         val updated = prev.copy(
             uwbMeters = fix.meters,
-            azimuthDeg = fix.azimuthDeg ?: prev.azimuthDeg,
+            azimuthDeg = az ?: prev.azimuthDeg,
             elevationDeg = fix.elevationDeg,
-            bearingSource = if (fix.azimuthDeg != null) BearingSource.UWB else prev.bearingSource,
+            bearingSource = if (az != null) BearingSource.UWB else prev.bearingSource,
+            worldBearingDeg = if (az != null) Angles.worldBearing(heading, az) else prev.worldBearingDeg,
             lastSeenElapsedMs = SystemClock.elapsedRealtime()
         )
         peers[short] = updated
@@ -559,7 +574,7 @@ class FindRepository(context: Context) : SensorEventListener {
         val mine = ownFix ?: return
         val distance = GeoMath.meters(mine.lat, mine.lng, fix.lat, fix.lng)
         val worldBearing = GeoMath.bearing(mine.lat, mine.lng, fix.lat, fix.lng)
-        val relative = Angles.wrap180(worldBearing - heading)
+        val relative = Angles.relativeAzimuth(worldBearing, heading)
         val updated = prev.copy(
             geoMeters = distance,
             geoAccuracy = maxOf(mine.accuracy, fix.accuracy),
@@ -581,6 +596,7 @@ class FindRepository(context: Context) : SensorEventListener {
                 sensors.unregisterListener(this)
                 sensorsOn = false
             }
+            headingReady = false
             return
         }
         val rot = sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
@@ -603,9 +619,7 @@ class FindRepository(context: Context) : SensorEventListener {
                 if (alarmer.active) continue
                 val snap = _state.value
                 val live = radarPeers
-                val target = live.find { it.id == snap.selectedPeerId }
-                    ?: live.filter { it.azimuthDeg != null }.minByOrNull { it.meters ?: 99f }
-                    ?: continue
+                val target = FindFocus.focusedPeer(live, snap.selectedPeerId) ?: continue
                 val err = abs(target.azimuthDeg ?: continue)
                 if (!HeadingCue.locked(err)) continue
                 val now = SystemClock.elapsedRealtime()
@@ -622,18 +636,19 @@ class FindRepository(context: Context) : SensorEventListener {
         SensorManager.getRotationMatrixFromVector(rot, event.values)
         val ori = FloatArray(3)
         SensorManager.getOrientation(rot, ori)
-        val newHeading = Math.toDegrees(ori[0].toDouble()).toFloat()
-        val delta = Angles.wrap180(newHeading - heading)
-        if (abs(delta) <= 0.1f) return
-        heading = newHeading
-        // Only GEO bearings are world-absolute and must be recomputed from heading.
-        // UWB and rotation-estimate azimuths are already relative to the phone top.
+        val rawHeading = Math.toDegrees(ori[0].toDouble()).toFloat()
+        val filtered = if (headingReady) Angles.filterHeading(heading, rawHeading) else rawHeading
+        headingReady = true
+        val delta = Angles.wrap180(filtered - heading)
+        heading = filtered
+        if (abs(delta) < 0.05f) return
+        // GEO, SPIN, and the last UWB fix all store a world bearing so the
+        // pointer can track the phone between samples.
         peers.keys.toList().forEach { key ->
             val p = peers[key] ?: return@forEach
-            if (p.worldBearingDeg != null) {
-                val newAz = Angles.wrap180(p.worldBearingDeg - heading)
-                if (newAz != p.azimuthDeg) peers[key] = p.copy(azimuthDeg = newAz)
-            }
+            val world = p.worldBearingDeg ?: return@forEach
+            val newAz = Angles.relativeAzimuth(world, heading)
+            if (newAz != p.azimuthDeg) peers[key] = p.copy(azimuthDeg = newAz)
         }
         radarPeers = peers.values.filter { it.withinTenMeters }.sortedBy { it.meters ?: 99f }
     }

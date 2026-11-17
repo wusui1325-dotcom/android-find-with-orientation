@@ -5,6 +5,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class SpinEstimatorTest {
     @Test
@@ -39,5 +40,32 @@ class SpinEstimatorTest {
         val bearing = SpinEstimator.bearing(samples, heading = 0f)
         assertNotNull(bearing)
         assertEquals(30f, bearing!!, 8f)
+    }
+
+    @Test
+    fun rearPeakIsFullCircle() {
+        // Walk a full turn; strongest RSSI is behind the user (heading 180, current 0).
+        val samples = (0..36).map { i ->
+            val heading = i * 10f
+            val rssi = if (heading == 180f) -40 else -80
+            heading to rssi
+        }
+        val bearing = SpinEstimator.bearing(samples, heading = 0f)
+        assertNotNull(bearing)
+        val wrapped = Angles.wrap180(bearing!!)
+        assertTrue("rear peak must not be coerced into ±90, got $wrapped", abs(wrapped) > 90f)
+        assertEquals(180f, abs(wrapped), 15f)
+    }
+
+    @Test
+    fun rearPeakRelativeToTurnedPhone() {
+        val samples = (0..36).map { i ->
+            val heading = i * 10f
+            val rssi = if (heading == 180f) -40 else -80
+            heading to rssi
+        }
+        val bearing = SpinEstimator.bearing(samples, heading = 90f)
+        assertNotNull(bearing)
+        assertEquals(90f, bearing!!, 15f)
     }
 }
